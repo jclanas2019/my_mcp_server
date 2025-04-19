@@ -1,0 +1,4 @@
+{
+  "transport": "stdio",
+  "command": ["python3", "mcp_servidor_basico.py"]
+}
