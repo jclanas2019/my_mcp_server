@@ -142,4 +142,4 @@ Las contribuciones son bienvenidas. Por favor, sigue estos pasos:
 
 ## Contacto
 
-Para preguntas o soporte, contacta a [tu-email@ejemplo.com](mailto:jc@lab-ai.org]
+Para preguntas o soporte, contacta a (mailto:jc@lab-ai.org]
