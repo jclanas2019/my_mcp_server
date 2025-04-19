@@ -11,30 +11,9 @@ import logging
 import secrets
 import signal
 import sys
+import inspect
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, Tuple
-
-# Importar handler original
-try:
-    from handler import handle_message
-    from registry import init_registry
-except ImportError as e:
-    print(f"Error importando módulos originales: {e}")
-    print("Usando implementaciones de fallback...")
-    
-    # Implementación de fallback para handle_message
-    def handle_message(message):
-        """Implementación de fallback para handle_message."""
-        return {"text": f"Mensaje recibido: {message.get('tool')} - Operación simulada."}
-    
-    # Implementación de fallback para init_registry
-    def init_registry():
-        """Implementación de fallback para init_registry."""
-        print("Inicializando registro (fallback)...")
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Configuración de logging seguro
-# ─────────────────────────────────────────────────────────────────────────────
+from typing import Dict, Any, Optional, Tuple, Callable, List, Union
 
 # Configuración de logging
 LOG_DIR = "logs"
@@ -57,7 +36,6 @@ logger = logging.getLogger("mcp_server")
 # Configuración de seguridad
 # ─────────────────────────────────────────────────────────────────────────────
 
-# En producción, cargar estas configuraciones de variables de entorno o un archivo de configuración seguro
 HOST = "127.0.0.1"  # Solo permitir conexiones locales para mayor seguridad
 PORT = 5050
 BUFFER_SIZE = 4096
@@ -84,6 +62,150 @@ rate_limits: Dict[str, list] = {}
 active_sessions: Dict[str, datetime] = {}
 # Mutex para rate_limits y active_sessions
 lock = threading.Lock()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Registro de herramientas mejorado con metadatos
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ToolRegistry:
+    """Registro mejorado de herramientas con metadatos y discovery."""
+    
+    def __init__(self):
+        self._tools: Dict[str, Callable] = {}
+        self._prompts: Dict[str, Callable] = {}
+        self._tools_metadata: Dict[str, Dict[str, Any]] = {}
+    
+    def register_tool(self, name: str, func: Callable, metadata: Optional[Dict[str, Any]] = None):
+        """
+        Registra una herramienta con metadatos.
+        
+        Args:
+            name: Nombre de la herramienta
+            func: Función que implementa la herramienta
+            metadata: Diccionario con metadatos (description, params, examples, etc.)
+        """
+        if name in self._tools:
+            raise ValueError(f"Tool '{name}' ya está registrada.")
+        
+        self._tools[name] = func
+        
+        # Si no se proporcionan metadatos, intentamos extraerlos automáticamente
+        if metadata is None:
+            metadata = {}
+            
+            # Extraer descripción de la docstring
+            if func.__doc__:
+                metadata["description"] = func.__doc__.strip()
+            else:
+                metadata["description"] = f"Herramienta {name} (sin descripción)"
+            
+            # Intentar extraer parámetros de la firma de la función
+            sig = inspect.signature(func)
+            params = {}
+            for param_name, param in sig.parameters.items():
+                if param_name not in ["args", "memoria"]:  # Ignoramos parámetros estándar
+                    param_info = {
+                        "required": param.default == inspect.Parameter.empty,
+                        "type": "string"  # Por defecto asumimos string
+                    }
+                    params[param_name] = param_info
+            
+            metadata["params"] = params
+        
+        self._tools_metadata[name] = metadata
+    
+    def register_prompt(self, name: str, func: Callable, metadata: Optional[Dict[str, Any]] = None):
+        """Registra un prompt con metadatos opcionales."""
+        if name in self._prompts:
+            raise ValueError(f"Prompt '{name}' ya está registrado.")
+        
+        self._prompts[name] = func
+        
+        # TODO: Implementar metadatos para prompts si es necesario
+    
+    def get_tool(self, name: str) -> Optional[Callable]:
+        """Obtiene una herramienta por su nombre."""
+        return self._tools.get(name)
+    
+    def get_prompt(self, name: str) -> Optional[Callable]:
+        """Obtiene un prompt por su nombre."""
+        return self._prompts.get(name)
+    
+    def list_tools(self) -> List[str]:
+        """Lista los nombres de todas las herramientas registradas."""
+        return list(self._tools.keys())
+    
+    def list_prompts(self) -> List[str]:
+        """Lista los nombres de todos los prompts registrados."""
+        return list(self._prompts.keys())
+    
+    def get_tool_metadata(self, name: str) -> Optional[Dict[str, Any]]:
+        """Obtiene los metadatos de una herramienta específica."""
+        return self._tools_metadata.get(name)
+    
+    def get_all_tools_metadata(self) -> Dict[str, Dict[str, Any]]:
+        """Obtiene los metadatos de todas las herramientas."""
+        return self._tools_metadata
+    
+    def debug_registry(self) -> Dict[str, Any]:
+        """Genera información de diagnóstico sobre el registro."""
+        return {
+            "tools": self.list_tools(),
+            "prompts": self.list_prompts(),
+            "tools_metadata": self._tools_metadata
+        }
+
+# Instancia global del registro
+registry = ToolRegistry()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Base de datos en memoria: notas por sesión
+# ─────────────────────────────────────────────────────────────────────────────
+
+notas_por_sesion: Dict[str, List[str]] = {}
+
+def get_sesion(session_id: str) -> List[str]:
+    """Obtiene o crea una sesión para almacenamiento de notas."""
+    if session_id not in notas_por_sesion:
+        notas_por_sesion[session_id] = []
+    return notas_por_sesion[session_id]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Herramientas básicas mejoradas con metadatos
+# ─────────────────────────────────────────────────────────────────────────────
+
+def append_nota(args: Dict[str, Any], memoria: List[str]) -> str:
+    """
+    Agrega una nueva nota textual a la sesión actual.
+    
+    Args:
+        nota: Texto de la nota a registrar
+        
+    Returns:
+        Confirmación de que la nota ha sido registrada
+    
+    Examples:
+        {"nota": "Esta es una nota de ejemplo"}
+    """
+    nota = args.get("nota")
+    if not nota:
+        return "Falta el argumento obligatorio: 'nota'."
+    memoria.append(nota)
+    return f"Nota registrada: {nota}"
+
+def leer_notas(args: Dict[str, Any], memoria: List[str]) -> str:
+    """
+    Devuelve todas las notas registradas en la sesión actual.
+    
+    Returns:
+        Lista de notas registradas o mensaje indicando que no hay notas
+    
+    Examples:
+        {}  # No requiere argumentos
+    """
+    if not memoria:
+        return "No hay notas registradas aún en esta sesión."
+    return "Notas registradas:\n" + "\n".join(f"- {n}" for n in memoria)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Funciones de seguridad
@@ -223,17 +345,20 @@ def validate_message(message: Any) -> Tuple[bool, Optional[Dict], str]:
         return False, None, "El mensaje debe ser un objeto JSON"
     
     # Verificar campos requeridos
-    required_fields = ["type", "tool"]
-    for field in required_fields:
-        if field not in message:
-            return False, None, f"Campo requerido faltante: {field}"
+    if "type" not in message:
+        return False, None, "Campo requerido faltante: type"
     
     # Verificar tipos de datos
     if not isinstance(message.get("type"), str):
         return False, None, "El campo 'type' debe ser una cadena de texto"
     
-    if not isinstance(message.get("tool"), str):
-        return False, None, "El campo 'tool' debe ser una cadena de texto"
+    # Para mensajes de tipo call_tool, verificamos requisitos adicionales
+    if message.get("type") == "call_tool":
+        if "tool" not in message:
+            return False, None, "Campo requerido faltante para call_tool: tool"
+            
+        if not isinstance(message.get("tool"), str):
+            return False, None, "El campo 'tool' debe ser una cadena de texto"
     
     # Validar session_id si existe
     if "session_id" in message:
@@ -246,9 +371,10 @@ def validate_message(message: Any) -> Tuple[bool, Optional[Dict], str]:
     # Sanitizar mensaje
     sanitized_message = message.copy()
     
-    # Sanitizar tipo y herramienta
+    # Sanitizar tipo y herramienta si existe
     sanitized_message["type"] = sanitize_input(sanitized_message["type"])
-    sanitized_message["tool"] = sanitize_input(sanitized_message["tool"])
+    if "tool" in sanitized_message:
+        sanitized_message["tool"] = sanitize_input(sanitized_message["tool"])
     
     # Sanitizar argumentos si existen
     if "arguments" in sanitized_message:
@@ -266,6 +392,113 @@ def validate_message(message: Any) -> Tuple[bool, Optional[Dict], str]:
         sanitized_message["arguments"] = sanitized_args
     
     return True, sanitized_message, ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Handler de mensajes mejorado con discovery
+# ─────────────────────────────────────────────────────────────────────────────
+
+def handle_message(message: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Procesa mensajes entrantes y ejecuta las acciones correspondientes.
+    Soporta discovery automático de herramientas.
+    """
+    tipo = message.get("type")
+    session_id = message.get("session_id", "default")  # por defecto "default"
+
+    if tipo == "call_tool":
+        name = message.get("tool")
+        args = message.get("arguments", {})
+        tool = registry.get_tool(name)
+        if not tool:
+            return {
+                "type": "error",
+                "text": f"Herramienta no encontrada: {name}"
+            }
+
+        memoria = get_sesion(session_id)
+        try:
+            resultado = tool(args, memoria)
+            return {
+                "type": "text",
+                "text": resultado
+            }
+        except Exception as e:
+            logger.error(f"Error ejecutando herramienta {name}: {e}", exc_info=True)
+            return {
+                "type": "error",
+                "text": f"Error al ejecutar la herramienta: {str(e)}"
+            }
+
+    elif tipo == "get_prompt":
+        name = message.get("prompt")
+        prompt_func = registry.get_prompt(name)
+        if not prompt_func:
+            return {
+                "type": "error",
+                "text": f"Prompt no encontrado: {name}"
+            }
+        try:
+            return {
+                "type": "text",
+                "text": prompt_func()
+            }
+        except Exception as e:
+            logger.error(f"Error obteniendo prompt {name}: {e}", exc_info=True)
+            return {
+                "type": "error",
+                "text": f"Error al obtener el prompt: {str(e)}"
+            }
+
+    elif tipo == "list_tools":
+        return {
+            "type": "tool_list",
+            "tools": registry.list_tools()
+        }
+
+    elif tipo == "list_prompts":
+        return {
+            "type": "prompt_list",
+            "prompts": registry.list_prompts()
+        }
+        
+    elif tipo == "get_tool_metadata":
+        tool_name = message.get("tool")
+        if not tool_name:
+            return {
+                "type": "error",
+                "text": "Se requiere especificar una herramienta"
+            }
+            
+        metadata = registry.get_tool_metadata(tool_name)
+        if not metadata:
+            return {
+                "type": "error",
+                "text": f"No se encontraron metadatos para la herramienta: {tool_name}"
+            }
+            
+        return {
+            "type": "tool_metadata",
+            "tool": tool_name,
+            "metadata": metadata
+        }
+        
+    elif tipo == "get_all_tools_metadata":
+        return {
+            "type": "all_tools_metadata",
+            "metadata": registry.get_all_tools_metadata()
+        }
+        
+    elif tipo == "debug_registry":
+        return {
+            "type": "debug_info",
+            "info": registry.debug_registry()
+        }
+
+    else:
+        return {
+            "type": "error",
+            "text": f"Tipo de mensaje desconocido: {tipo}"
+        }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Manejador de clientes
@@ -332,7 +565,7 @@ def handle_client(conn, addr):
                             break
                         
                         # Procesar mensaje validado
-                        logger.info(f"Procesando mensaje de {client_id}: {sanitized_msg['tool']}")
+                        logger.info(f"Procesando mensaje de {client_id}: {sanitized_msg.get('type')}")
                         start_time = time.time()
                         response = handle_message(sanitized_msg)
                         process_time = time.time() - start_time
@@ -361,6 +594,50 @@ def handle_client(conn, addr):
         logger.info(f"🔌 Conexión cerrada: {client_id}")
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Inicialización del registro
+# ─────────────────────────────────────────────────────────────────────────────
+
+def init_registry():
+    """Inicializa el registro con herramientas y prompts."""
+    
+    # Registramos las herramientas básicas con metadatos mejorados
+    registry.register_tool("append_nota", append_nota, {
+        "description": "Agrega una nueva nota textual a la sesión actual.",
+        "params": {
+            "nota": {
+                "type": "string",
+                "description": "Texto de la nota a registrar",
+                "required": True
+            }
+        },
+        "examples": [
+            {"nota": "Esta es una nota de ejemplo"}
+        ],
+        "returns": "Confirmación de que la nota ha sido registrada"
+    })
+    
+    registry.register_tool("leer_notas", leer_notas, {
+        "description": "Devuelve todas las notas registradas en la sesión actual.",
+        "params": {},  # No requiere parámetros
+        "examples": [{}],
+        "returns": "Lista de notas registradas o mensaje indicando que no hay notas"
+    })
+    
+    # Intentamos cargar prompts si existen
+    try:
+        from prompts.educativo import prompt_langchain_basico, prompt_langchain_avanzado, prompt_mcp_integracion
+        
+        registry.register_prompt("langchain-basico", prompt_langchain_basico)
+        registry.register_prompt("langchain-avanzado", prompt_langchain_avanzado)
+        registry.register_prompt("mcp-integracion", prompt_mcp_integracion)
+        
+        logger.info("Prompts educativos registrados correctamente")
+    except ImportError:
+        logger.warning("No se pudieron cargar los prompts educativos")
+    
+    logger.info(f"Registro inicializado con {len(registry.list_tools())} herramientas y {len(registry.list_prompts())} prompts")
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Manejo de señales
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -374,7 +651,7 @@ def signal_handler(sig, frame):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    """Función principal del servidor MCP."""
+    """Función principal del servidor MCP con discovery."""
     # Registrar manejadores de señales
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -399,8 +676,8 @@ def main():
         server_socket.bind((HOST, PORT))
         server_socket.listen(MAX_CONNECTIONS)
         
-        logger.info(f"✅ Servidor MCP seguro escuchando en {HOST}:{PORT}")
-        print(f"✅ Servidor MCP seguro escuchando en {HOST}:{PORT}")
+        logger.info(f"✅ Servidor MCP con Discovery escuchando en {HOST}:{PORT}")
+        print(f"✅ Servidor MCP con Discovery escuchando en {HOST}:{PORT}")
         
         # Lista de hilos de cliente activos
         client_threads = []
